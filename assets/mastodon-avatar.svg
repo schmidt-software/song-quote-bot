@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#DB2777"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="110" fill="url(#bg)"/>
+
+  <!-- speech bubble -->
+  <path d="
+    M 106 128
+    q 0 -32 32 -32
+    h 236
+    q 32 0 32 32
+    v 168
+    q 0 32 -32 32
+    h -186
+    l -58 56
+    a 6 6 0 0 1 -10 -4
+    l 4 -70
+    h -18
+    q -32 0 -32 -32
+    z
+  " fill="#ffffff"/>
+
+  <!-- eighth note -->
+  <g fill="url(#bg)">
+    <ellipse cx="230" cy="248" rx="30" ry="22" transform="rotate(-16 230 248)"/>
+    <rect x="253" y="128" width="16" height="122" rx="6"/>
+    <path d="
+      M 269 130
+      C 302 136, 330 156, 332 182
+      C 333 202, 320 218, 298 226
+      C 310 206, 306 182, 292 162
+      C 285 152, 277 141, 269 130
+      Z
+    "/>
+  </g>
+</svg>
