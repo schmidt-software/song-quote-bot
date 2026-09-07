@@ -1,0 +1,13 @@
+# Local, machine-specific config (contains your Ollama endpoint etc.)
+.env
+
+# Runtime state / generated data
+posted_quotes.json
+post_song_quote.log
+*.tmp
+
+# Editor / tooling
+.claude/
+
+# Unrelated local helper scripts
+resume.sh
