@@ -1,6 +1,9 @@
 # Local, machine-specific config (contains your Ollama endpoint etc.)
 .env
 
+# Local band list (see bands.txt.example)
+bands.txt
+
 # Runtime state / generated data
 posted_quotes.json
 post_song_quote.log

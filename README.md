@@ -44,6 +44,7 @@ cd song-quote-bot
 cp .env.example .env
 # edit .env: point OLLAMA_URL at your Ollama server and pick a model
 
+cp bands.txt.example bands.txt
 # add/remove bands, one per line
 $EDITOR bands.txt
 
@@ -72,7 +73,7 @@ All local, machine-specific settings live in `.env` (git-ignored, see `.env.exam
 | `MASTODON_URL`           | Base URL of your Mastodon instance (only needed if `mastodon` is in `POST_TARGETS`) |
 | `MASTODON_ACCESS_TOKEN`  | Access token with the `write:statuses` scope — create one under *Settings → Development → New Application* on your instance |
 
-`bands.txt` holds the pool of bands to choose from, one per line.
+`bands.txt` holds the pool of bands to choose from, one per line - it's git-ignored (like `.env`), so your personal list stays local; copy it from `bands.txt.example` to get started.
 
 Each configured target is posted to independently — if one is down or misconfigured, the others still go out; the outcome of every target (success or error) is recorded per post in `posted_quotes.json` and printed to the log. The run only counts as failed, and gets retried, if *every* configured target fails.
 
@@ -95,7 +96,8 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 | File                    | Purpose                                                      |
 |-------------------------|---------------------------------------------------------------|
 | `post_song_quote.sh`    | Main script: pick, dedupe, post                              |
-| `bands.txt`             | List of bands to choose from, one per line                   |
+| `bands.txt.example`     | Template for your band list                                  |
+| `bands.txt`             | Your local, git-ignored list of bands to choose from, one per line |
 | `.env.example`          | Template for local configuration                             |
 | `posted_quotes.json`    | Generated automatically; history used for deduplication      |
 | `post_song_quote.log`   | Generated automatically; append-only run log                 |
