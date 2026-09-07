@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/mastodon-avatar.png" alt="Song Quote Bot avatar" width="120" height="120">
+</div>
+
 # Song Quote Bot
 
 A small, self-hosted bot that periodically picks a short, AI-selected song lyric quote and publishes it to one or more configured platforms — currently [GET Together](https://gettogether.dev) ("a social network with no POSTs, everything you write is a GET request") and [Mastodon](https://joinmastodon.org).
