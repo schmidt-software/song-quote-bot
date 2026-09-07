@@ -8,6 +8,52 @@ cd "$(dirname "$0")"
 : "${OLLAMA_URL:?Set OLLAMA_URL (e.g. in .env) to your Ollama server, e.g. http://localhost:11434/api/chat}"
 : "${OLLAMA_MODEL:?Set OLLAMA_MODEL (e.g. in .env) to the model to use, e.g. llama3.1:8b}"
 : "${POST_NAME:=songcites}"
+: "${POST_TARGETS:=gettogether}"
+
+# Validate every configured target up front, before doing any (costly) LLM work.
+IFS=',' read -ra TARGET_LIST <<< "$POST_TARGETS"
+for t in "${TARGET_LIST[@]}"; do
+  case "$t" in
+    gettogether) : ;;
+    mastodon)
+      : "${MASTODON_URL:?Set MASTODON_URL (e.g. in .env) to your Mastodon instance, e.g. https://mastodon.social}"
+      : "${MASTODON_ACCESS_TOKEN:?Set MASTODON_ACCESS_TOKEN (e.g. in .env) - create one under Settings > Development > New Application with the write:statuses scope}"
+      ;;
+    *)
+      echo "Unbekanntes POST_TARGET: '$t' (unterstützt: gettogether, mastodon)" >&2
+      exit 1
+      ;;
+  esac
+done
+
+post_to_gettogether() {
+  local text="$1" response
+  if ! response=$(curl -sS --max-time 30 -G 'https://gettogether.dev/post' --data-urlencode "name=${POST_NAME}" --data-urlencode "text=${text}"); then
+    jq -cn '{ok: false, error: "curl request failed (network/timeout)"}'
+    return 0
+  fi
+  if echo "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
+    jq -cn --arg id "$(echo "$response" | jq -r '.id')" '{ok: true, id: $id}'
+  else
+    jq -cn --arg error "$response" '{ok: false, error: $error}'
+  fi
+}
+
+post_to_mastodon() {
+  local text="$1" response
+  if ! response=$(curl -sS --max-time 30 -X POST "${MASTODON_URL%/}/api/v1/statuses" \
+    -H "Authorization: Bearer ${MASTODON_ACCESS_TOKEN}" \
+    --data-urlencode "status=${text}" \
+    --data-urlencode "visibility=public"); then
+    jq -cn '{ok: false, error: "curl request failed (network/timeout)"}'
+    return 0
+  fi
+  if echo "$response" | jq -e '.id != null' >/dev/null 2>&1; then
+    jq -cn --arg id "$(echo "$response" | jq -r '.id')" --arg url "$(echo "$response" | jq -r '.url // empty')" '{ok: true, id: $id, url: $url}'
+  else
+    jq -cn --arg error "$response" '{ok: false, error: $error}'
+  fi
+}
 
 DB_FILE="posted_quotes.json"
 BANDS_FILE="bands.txt"
@@ -84,18 +130,33 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   fi
 
   TEXT="${QUOTE} (${BAND}, ${SONG})"
-  RESPONSE=$(curl -sS -G 'https://gettogether.dev/post' --data-urlencode "name=${POST_NAME}" --data-urlencode "text=${TEXT}")
 
-  if echo "$RESPONSE" | jq -e '.ok == true' >/dev/null 2>&1; then
-    ID=$(echo "$RESPONSE" | jq -r '.id')
+  # Post to every configured target independently - one target being down
+  # shouldn't block the others, but every result (success or failure) is
+  # recorded so it's visible which platforms actually received the post.
+  PLATFORM_ENTRIES="[]"
+  any_ok=0
+  for t in "${TARGET_LIST[@]}"; do
+    case "$t" in
+      gettogether) RESULT_JSON=$(post_to_gettogether "$TEXT") ;;
+      mastodon) RESULT_JSON=$(post_to_mastodon "$TEXT") ;;
+    esac
+    PLATFORM_ENTRIES=$(jq -c --arg k "$t" --argjson v "$RESULT_JSON" '. + [{key: $k, value: $v}]' <<< "$PLATFORM_ENTRIES")
+    if echo "$RESULT_JSON" | jq -e '.ok == true' >/dev/null 2>&1; then
+      any_ok=1
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [$t] Gepostet: \"$QUOTE\" ($BAND, $SONG) - $(echo "$RESULT_JSON" | jq -r '.id')"
+    else
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [$t] Post fehlgeschlagen (Versuch $attempt): $(echo "$RESULT_JSON" | jq -r '.error')"
+    fi
+  done
+
+  if [ "$any_ok" -eq 1 ]; then
+    PLATFORMS_JSON=$(jq -c 'from_entries' <<< "$PLATFORM_ENTRIES")
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    jq --arg band "$BAND" --arg song "$SONG" --arg quote "$QUOTE" --arg id "$ID" --arg ts "$NOW" \
-      '. += [{"band":$band,"song":$song,"quote":$quote,"id":$id,"posted_at":$ts}]' "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Gepostet: \"$QUOTE\" ($BAND, $SONG) - ID $ID"
+    jq --arg band "$BAND" --arg song "$SONG" --arg quote "$QUOTE" --argjson platforms "$PLATFORMS_JSON" --arg ts "$NOW" \
+      '. += [{"band":$band,"song":$song,"quote":$quote,"platforms":$platforms,"posted_at":$ts}]' "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
     success=1
     break
-  else
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Post fehlgeschlagen (Versuch $attempt): $RESPONSE"
   fi
 done
 

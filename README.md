@@ -1,6 +1,6 @@
 # Song Quote Bot
 
-A small, self-hosted bot that periodically picks a short, AI-selected song lyric quote and publishes it. It currently posts to [GET Together](https://gettogether.dev) — "a social network with no POSTs, everything you write is a GET request" — with support for other platforms (e.g. Mastodon) planned.
+A small, self-hosted bot that periodically picks a short, AI-selected song lyric quote and publishes it to one or more configured platforms — currently [GET Together](https://gettogether.dev) ("a social network with no POSTs, everything you write is a GET request") and [Mastodon](https://joinmastodon.org).
 
 Every run:
 
@@ -22,8 +22,8 @@ flowchart LR
 ## Roadmap
 
 - [x] Post to GET Together
-- [ ] Post to Mastodon
-- [ ] Pluggable output targets, configurable per run
+- [x] Post to Mastodon
+- [x] Pluggable output targets, configurable per run
 
 ## Requirements
 
@@ -59,13 +59,20 @@ Schedule it, e.g. hourly via `cron`:
 
 All local, machine-specific settings live in `.env` (git-ignored, see `.env.example`):
 
-| Variable       | Description                                                         |
-|----------------|-----------------------------------------------------------------------|
-| `OLLAMA_URL`   | Full URL of your Ollama server's chat endpoint, e.g. `http://localhost:11434/api/chat` |
-| `OLLAMA_MODEL` | Model name to use for picking band/song/quote                       |
-| `POST_NAME`    | Nickname used on gettogether.dev — 2-20 letters, numbers, or underscores, no spaces |
+| Variable                 | Description                                                         |
+|--------------------------|-----------------------------------------------------------------------|
+| `OLLAMA_URL`             | Full URL of your Ollama server's chat endpoint, e.g. `http://localhost:11434/api/chat` |
+| `OLLAMA_MODEL`           | Model name to use for picking band/song/quote                       |
+| `POST_TARGETS`           | Comma-separated list of platforms to post to: `gettogether`, `mastodon` (default: `gettogether`) |
+| `POST_NAME`              | Nickname used on gettogether.dev — 2-20 letters, numbers, or underscores, no spaces |
+| `MASTODON_URL`           | Base URL of your Mastodon instance (only needed if `mastodon` is in `POST_TARGETS`) |
+| `MASTODON_ACCESS_TOKEN`  | Access token with the `write:statuses` scope — create one under *Settings → Development → New Application* on your instance |
 
 `bands.txt` holds the pool of bands to choose from, one per line.
+
+Each configured target is posted to independently — if one is down or misconfigured, the others still go out; the outcome of every target (success or error) is recorded per post in `posted_quotes.json` and printed to the log. The run only counts as failed, and gets retried, if *every* configured target fails.
+
+> **Note:** Mastodon support has been tested against the API contract (error handling, request shape) but not yet against a live instance/account. If you try it, feedback and bug reports are welcome.
 
 ## How variety is enforced
 
@@ -75,7 +82,7 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 - **Song:** the model is told which songs of the chosen band were already posted and asked to pick a different one.
 - **Quote:** the model is told which quotes were already posted and asked to avoid them.
 
-`posted_quotes.json` is a small local database of everything already posted (band, song, quote, post ID, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to 5 times, with a slightly increased sampling temperature) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
+`posted_quotes.json` is a small local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to 5 times, with a slightly increased sampling temperature) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
 
 ## Files
 
