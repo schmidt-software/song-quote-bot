@@ -72,7 +72,9 @@ All local, machine-specific settings live in `.env` (git-ignored, see `.env.exam
 
 Each configured target is posted to independently — if one is down or misconfigured, the others still go out; the outcome of every target (success or error) is recorded per post in `posted_quotes.json` and printed to the log. The run only counts as failed, and gets retried, if *every* configured target fails.
 
-> **Note:** Mastodon support has been tested against the API contract (error handling, request shape) but not yet against a live instance/account. If you try it, feedback and bug reports are welcome.
+The Mastodon post gets `#songquote` appended to the text; GET Together's post is unaffected.
+
+> **Note:** Mastodon support has been verified against a real instance/account (post + delete, and the invalid-token error path).
 
 ## How variety is enforced
 

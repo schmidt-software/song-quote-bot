@@ -139,7 +139,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   for t in "${TARGET_LIST[@]}"; do
     case "$t" in
       gettogether) RESULT_JSON=$(post_to_gettogether "$TEXT") ;;
-      mastodon) RESULT_JSON=$(post_to_mastodon "$TEXT") ;;
+      mastodon) RESULT_JSON=$(post_to_mastodon "${TEXT} #songquote") ;;
     esac
     PLATFORM_ENTRIES=$(jq -c --arg k "$t" --argjson v "$RESULT_JSON" '. + [{key: $k, value: $v}]' <<< "$PLATFORM_ENTRIES")
     if echo "$RESULT_JSON" | jq -e '.ok == true' >/dev/null 2>&1; then
