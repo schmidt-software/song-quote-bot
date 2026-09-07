@@ -6,6 +6,8 @@
 
 A small, self-hosted bot that periodically picks a short, AI-selected song lyric quote and publishes it to one or more configured platforms — currently [GET Together](https://gettogether.dev) ("a social network with no POSTs, everything you write is a GET request") and [Mastodon](https://joinmastodon.org).
 
+See it in action on Mastodon: [@songquotebot@mastodon.social](https://mastodon.social/@songquotebot)
+
 Every run:
 
 1. Picks a random band from a configurable list — chosen locally with true uniform randomness, not by the LLM (see below).
