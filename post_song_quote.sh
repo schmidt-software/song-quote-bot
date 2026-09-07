@@ -13,25 +13,46 @@ DB_FILE="posted_quotes.json"
 BANDS_FILE="bands.txt"
 [ -f "$DB_FILE" ] || echo '[]' > "$DB_FILE"
 
-SCHEMA='{"type":"object","properties":{"band":{"type":"string"},"song":{"type":"string"},"quote":{"type":"string"}},"required":["band","song","quote"],"additionalProperties":false}'
+SCHEMA='{"type":"object","properties":{"song":{"type":"string"},"quote":{"type":"string"}},"required":["song","quote"],"additionalProperties":false}'
 
-BANDS=$(paste -sd, "$BANDS_FILE")
-LAST_BAND=$(jq -r 'if length > 0 then .[-1].band else "" end' "$DB_FILE")
+# The band is picked here with `shuf`, not by the LLM: asked to "pick randomly",
+# models reliably gravitate towards the most famous/typical choice (e.g. Rammstein
+# - "Du hast") instead of sampling the list uniformly. To keep the rotation moving,
+# the most recently used bands are excluded from the draw.
+mapfile -t ALL_BANDS < "$BANDS_FILE"
+TOTAL_BANDS=${#ALL_BANDS[@]}
+EXCLUDE_COUNT=$(( TOTAL_BANDS > 4 ? 3 : (TOTAL_BANDS > 1 ? TOTAL_BANDS - 1 : 0) ))
+mapfile -t RECENT_BANDS < <(jq -r '[.[].band] | reverse | .[]' "$DB_FILE" | awk '!seen[$0]++' | head -n "$EXCLUDE_COUNT")
+
+CANDIDATE_BANDS=()
+for b in "${ALL_BANDS[@]}"; do
+  skip=0
+  for r in "${RECENT_BANDS[@]:-}"; do
+    [ "$b" = "$r" ] && { skip=1; break; }
+  done
+  [ "$skip" -eq 0 ] && CANDIDATE_BANDS+=("$b")
+done
+[ ${#CANDIDATE_BANDS[@]} -eq 0 ] && CANDIDATE_BANDS=("${ALL_BANDS[@]}")
 
 MAX_ATTEMPTS=5
 success=0
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+  BAND=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
   EXISTING=$(jq -c '[.[] | .quote]' "$DB_FILE")
+  # Same bias as with bands: left to itself, the model keeps reaching for the
+  # band's single most famous song (e.g. always "Du hast" for Rammstein). Tell
+  # it explicitly which songs of THIS band were already used.
+  USED_SONGS=$(jq -c --arg band "$BAND" '[.[] | select((.band | ascii_downcase) == ($band | ascii_downcase)) | .song] | unique' "$DB_FILE")
 
-  PROMPT="Wähle zufällig genau eine Band aus dieser Liste: ${BANDS}."
-  if [ -n "$LAST_BAND" ]; then
-    PROMPT="${PROMPT} Die zuletzt gewählte Band war '${LAST_BAND}' - wähle diesmal eine ANDERE Band."
+  PROMPT="Die Band ist '${BAND}'. Wähle einen Song dieser Band und ein kurzes, einprägsames Zitat (maximal 1-2 Zeilen, KEINE ganze Strophe) aus dem Songtext. Wähle nicht immer den bekanntesten Song - variiere bewusst."
+  if [ "$USED_SONGS" != "[]" ]; then
+    PROMPT="${PROMPT} Von dieser Band wurden bereits diese Songs verwendet, wähle einen ANDEREN: ${USED_SONGS}."
   fi
-  PROMPT="${PROMPT} Wähle dann zufällig einen Song dieser Band und ein kurzes, einprägsames Zitat (maximal 1-2 Zeilen, KEINE ganze Strophe) aus dem Songtext. Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
+  PROMPT="${PROMPT} Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
 
   REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$PROMPT" --argjson schema "$SCHEMA" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema}')
+    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 1.1}}')
 
   if ! RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt)"
@@ -44,19 +65,21 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     continue
   fi
 
-  BAND=$(echo "$RESULT" | jq -r '.band')
   SONG=$(echo "$RESULT" | jq -r '.song')
   QUOTE=$(echo "$RESULT" | jq -r '.quote')
 
-  if [ -n "$LAST_BAND" ] && [ "$(echo "$BAND" | tr '[:upper:]' '[:lower:]')" = "$(echo "$LAST_BAND" | tr '[:upper:]' '[:lower:]')" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Gleiche Band wie zuletzt erkannt (Versuch $attempt): $BAND - erneuter Versuch"
+  SONG_REPEAT=$(jq --arg band "$BAND" --arg song "$SONG" \
+    '[.[] | select((.band | ascii_downcase) == ($band | ascii_downcase) and (.song | ascii_downcase) == ($song | ascii_downcase))] | length' "$DB_FILE")
+
+  if [ "$SONG_REPEAT" -gt 0 ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Song bereits verwendet (Versuch $attempt, $BAND): $SONG - erneuter Versuch"
     continue
   fi
 
   DUP=$(jq --arg q "$QUOTE" '[.[] | select((.quote | ascii_downcase) == ($q | ascii_downcase))] | length' "$DB_FILE")
 
   if [ "$DUP" -gt 0 ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Duplikat erkannt (Versuch $attempt): $QUOTE - erneuter Versuch"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Duplikat erkannt (Versuch $attempt, $BAND): $QUOTE - erneuter Versuch"
     continue
   fi
 
