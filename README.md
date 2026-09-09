@@ -91,6 +91,10 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 - **Song:** the model is told which songs of the chosen band were already posted and asked to pick a different one.
 - **Quote:** the model is told which quotes were already posted and asked to avoid them.
 
+## Known limitation: hallucinated lyrics
+
+The LLM picks quotes from what it remembers about a song, not from a verified lyrics source - it can occasionally invent a line that sounds plausible but doesn't actually appear in the song. The prompt explicitly instructs the model to only use real, verbatim lines and to pick a different song if unsure, and the sampling temperature was deliberately lowered (once band/song variety became the script's job instead of the model's) to favor accuracy over creativity - but this reduces the risk, it doesn't eliminate it. There's no lyrics-verification step (e.g. against a lyrics API) at the moment. If you spot a wrong quote, it can be removed from `posted_quotes.json` and, if already published, deleted from the platform(s) directly.
+
 `posted_quotes.json` is a small local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to 5 times, with a slightly increased sampling temperature) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
 
 ## Files

@@ -95,10 +95,10 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   if [ "$USED_SONGS" != "[]" ]; then
     PROMPT="${PROMPT} Von dieser Band wurden bereits diese Songs verwendet, wähle einen ANDEREN: ${USED_SONGS}."
   fi
-  PROMPT="${PROMPT} Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
+  PROMPT="${PROMPT} Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Wichtig: Verwende ausschließlich eine Zeile, die wirklich und wortwörtlich im echten Songtext vorkommt. Erfinde NIEMALS eine Zeile. Wenn du dir bei einem Song nicht sicher bist, wähle einen anderen Song derselben Band, bei dem du dir des Wortlauts sicher bist. Antworte ausschließlich mit dem JSON-Objekt."
 
   REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$PROMPT" --argjson schema "$SCHEMA" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 1.1}}')
+    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7}}')
 
   if ! RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt)"
