@@ -122,7 +122,7 @@ for b in "${ALL_BANDS[@]}"; do
 done
 [ ${#CANDIDATE_BANDS[@]} -eq 0 ] && CANDIDATE_BANDS=("${ALL_BANDS[@]}")
 
-MAX_ATTEMPTS=5
+MAX_ATTEMPTS=10
 success=0
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
@@ -174,6 +174,10 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   VERIFY_STATUS=$(verify_quote "$BAND" "$SONG" "$QUOTE")
   if [ "$VERIFY_STATUS" = "mismatch" ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Zitat nicht in Songtext-Quelle gefunden, vermutlich halluziniert (Versuch $attempt, $BAND - $SONG): $QUOTE - erneuter Versuch"
+    continue
+  fi
+  if [ "$VERIFY_STATUS" = "unverified" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Keine Songtext-Quelle verfügbar, kein Nachweis möglich (Versuch $attempt, $BAND - $SONG): $QUOTE - erneuter Versuch"
     continue
   fi
 
