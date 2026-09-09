@@ -21,7 +21,9 @@ flowchart LR
     B --> C[Ollama LLM<br/>pick song + quote]
     D[posted_quotes.json] -->|already used?| C
     C -->|duplicate quote or song| C
-    C -->|fresh pick| E[publish]
+    C --> L[lyrics.ovh<br/>verify quote]
+    L -->|mismatch| C
+    L -->|verified / unverified| E[publish]
     E --> D
 ```
 
@@ -33,7 +35,7 @@ flowchart LR
 
 ## Requirements
 
-- `bash`, `curl`, `jq`
+- `bash`, `curl`, `jq`, `iconv` (part of glibc on virtually every Linux system)
 - Access to an [Ollama](https://ollama.com) server running a model that supports structured JSON output (e.g. `llama3.1`, `qwen2.5`, `qwen3`)
 - `cron` (or any other scheduler) for unattended, recurring runs
 
@@ -91,11 +93,19 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 - **Song:** the model is told which songs of the chosen band were already posted and asked to pick a different one.
 - **Quote:** the model is told which quotes were already posted and asked to avoid them.
 
-## Known limitation: hallucinated lyrics
+`posted_quotes.json` is a small local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to 5 times) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
 
-The LLM picks quotes from what it remembers about a song, not from a verified lyrics source - it can occasionally invent a line that sounds plausible but doesn't actually appear in the song. The prompt explicitly instructs the model to only use real, verbatim lines and to pick a different song if unsure, and the sampling temperature was deliberately lowered (once band/song variety became the script's job instead of the model's) to favor accuracy over creativity - but this reduces the risk, it doesn't eliminate it. There's no lyrics-verification step (e.g. against a lyrics API) at the moment. If you spot a wrong quote, it can be removed from `posted_quotes.json` and, if already published, deleted from the platform(s) directly.
+## Lyrics verification (and its limits)
 
-`posted_quotes.json` is a small local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to 5 times, with a slightly increased sampling temperature) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
+The LLM picks a quote from what it remembers about a song, not from an authoritative source - in practice it has invented plausible-sounding lines that don't actually appear in the song. Two mitigations:
+
+- The prompt explicitly forbids invented lines and tells the model to pick a different song of the same band if it's unsure of the exact wording; the sampling temperature is a conservative `0.7` (lowered from `1.1` once band/song variety became the script's job instead of the model's, since a high temperature was then only adding hallucination risk).
+- Before ever publishing, the script checks the quote against [lyrics.ovh](https://api.lyrics.ovh) (a free, keyless lyrics API). Text is normalized (accents transliterated the way the API does it, e.g. "bück" → "buck"; case and punctuation ignored) before comparing. The result - `verified`, `mismatch`, or `unverified` - is logged and stored per post in `posted_quotes.json` under `lyrics_check`:
+  - **`verified`** — the quote was found in the fetched lyrics.
+  - **`mismatch`** — lyrics were found, but the quote isn't in them → treated exactly like a duplicate: rejected and retried with a different pick.
+  - **`unverified`** — no lyrics available for that band/song (common for niche/local acts, or when the API's title matching doesn't find a match) → posted anyway, since there's nothing to check against.
+
+**This reduces the risk but doesn't eliminate it.** `unverified` posts carry the same risk as before this feature existed. Even `verified` isn't an absolute guarantee - lyrics.ovh is a single, community-sourced transcription and can itself be incomplete or differ from the "real" wording (famously ambiguous/mumbled lines, condensed repeated hooks, etc.). If you spot a wrong quote, remove its entry from `posted_quotes.json` and, if already published, delete it from the platform(s) directly.
 
 ## Files
 
