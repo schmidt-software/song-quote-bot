@@ -11,20 +11,26 @@ See it in action on Mastodon: [@songquotebot@mastodon.social](https://mastodon.s
 Every run:
 
 1. Picks a random band from a configurable list — chosen locally with true uniform randomness, not by the LLM (see below).
-2. Asks a locally-hosted LLM (via [Ollama](https://ollama.com)) to pick a song by that band and a short quote from its lyrics (a line or two — never a full verse).
-3. Makes sure neither the quote nor the song was used before for that band, retrying with the model if so.
-4. Publishes it and records it in a local JSON log.
+2. Asks a locally-hosted LLM (via [Ollama](https://ollama.com)) to pick a song by that band, not used before for it.
+3. Fetches the real lyrics for that song and asks the LLM to extract a short quote (a line or two — never a full verse) *from that actual text*, not from memory.
+4. Makes sure neither the quote nor the song was used before for that band, and double-checks the extracted quote is really in the fetched lyrics, retrying with a new pick if any of that fails.
+5. Publishes it and records it in a local JSON log.
 
 ```mermaid
 flowchart LR
     W[Wikidata] -->|update_bands.sh, daily| A[bands.txt]
     A -->|shuf, excluding recent bands| B[pick band]
-    B --> C[Ollama LLM<br/>pick song + quote]
-    D[posted_quotes.json] -->|already used?| C
-    C -->|duplicate quote or song| C
-    C --> L[lyrics.ovh<br/>verify quote]
-    L -->|mismatch or unverified| C
-    L -->|verified| E[publish]
+    B --> C[Ollama LLM<br/>pick song]
+    D[posted_quotes.json] -->|song already used?| C
+    C -->|duplicate song| C
+    C --> L[lyrics.ovh<br/>fetch real lyrics]
+    L -->|no lyrics found| C
+    L --> Q[Ollama LLM<br/>extract quote from lyrics]
+    Q -->|duplicate quote| C
+    Q --> V{quote actually<br/>in lyrics?}
+    V -->|no, mismatch| C
+    V -->|yes, verified| E[publish]
+    D -->|already used?| Q
     E --> D
 ```
 
@@ -104,17 +110,18 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 
 ## Lyrics verification (and its limits)
 
-The LLM picks a quote from what it remembers about a song, not from an authoritative source - in practice it has invented plausible-sounding lines that don't actually appear in the song. Mitigations:
+An LLM asked to recall a quote from a song it only knows "from memory" will confidently invent plausible-sounding lines that don't actually appear in it — that happened in practice. Rather than just detecting that after the fact, the pipeline is grounded in a real source from the start:
 
-- The prompt explicitly forbids invented lines and tells the model to pick a different song of the same band if it's unsure of the exact wording; the sampling temperature is a conservative `0.7` (lowered from `1.1` once band/song variety became the script's job instead of the model's, since a high temperature was then only adding hallucination risk).
-- Before ever publishing, the script checks the quote against [lyrics.ovh](https://api.lyrics.ovh) (a free, keyless lyrics API). Text is normalized (accents transliterated the way the API does it, e.g. "bück" → "buck"; case and punctuation ignored) before comparing. The result - `verified`, `mismatch`, or `unverified` - is logged and, for a post that goes out, stored under `lyrics_check` in `posted_quotes.json`:
-  - **`verified`** — the quote was found in the fetched lyrics → posted.
-  - **`mismatch`** — lyrics were found, but the quote isn't in them (likely hallucinated) → rejected and retried with a different pick.
-  - **`unverified`** — no lyrics available for that band/song (common for niche/local acts, or when the API's title matching doesn't find a match) → **also rejected and retried**, same as a mismatch. Only a `verified` quote actually gets posted.
+1. The LLM is asked for a song only, not yet a quote.
+2. The script fetches that song's real lyrics from [lyrics.ovh](https://api.lyrics.ovh) (a free, keyless lyrics API) — if no lyrics are found (common for niche/local acts, or a title the API can't match), the attempt is abandoned and retried with a new band/song pick.
+3. Only now is the LLM asked for a quote — given the actual fetched lyrics text as context, and told explicitly to extract a line verbatim from it rather than invent one.
+4. As a safety net, the script still independently double-checks the returned quote against the fetched lyrics text (normalized: accents transliterated the way the API does it, e.g. "bück" → "buck"; case and punctuation ignored) in case the model paraphrased anyway. A mismatch here is rejected and retried with a new pick.
 
-**Trade-off:** requiring `verified` means bands with no coverage in lyrics.ovh (typically small/local/regional acts) can never successfully post - every attempt for them ends in `unverified` → retry. `MAX_ATTEMPTS` (currently `10`) exists to absorb this: a run tries up to that many band/song/quote combinations before giving up entirely for that hour (logged as an error, nothing posted). If your `bands.txt` leans heavily towards niche acts, expect some hours to fail outright.
+Every post's outcome (`verified`, the only value once a mismatch would have been retried away) is stored under `lyrics_check` in `posted_quotes.json`.
 
-**Even `verified` isn't an absolute guarantee** - lyrics.ovh is a single, community-sourced transcription and can itself be incomplete or differ from the "real" wording (famously ambiguous/mumbled lines, condensed repeated hooks, etc.). If you spot a wrong quote, remove its entry from `posted_quotes.json` and, if already published, delete it from the platform(s) directly.
+**Trade-off:** bands with no coverage in lyrics.ovh (typically small/local/regional acts) can never successfully post - every song attempt for them fails to find lyrics and gets retried. `MAX_ATTEMPTS` (currently `10`) exists to absorb this: a run tries up to that many band/song/quote combinations before giving up entirely for that hour (logged as an error, nothing posted). If your `bands.txt` leans heavily towards niche acts, expect some hours to fail outright.
+
+**This still isn't an absolute guarantee** - lyrics.ovh is a single, community-sourced transcription and can itself be incomplete or differ from the "real" wording (famously ambiguous/mumbled lines, condensed repeated hooks, etc.), and a model can still occasionally alter a line just enough to slip past the substring check. If you spot a wrong quote, remove its entry from `posted_quotes.json` and, if already published, delete it from the platform(s) directly.
 
 ## Files
 
