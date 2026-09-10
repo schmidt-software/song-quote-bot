@@ -68,20 +68,17 @@ post_to_mastodon() {
   fi
 }
 
-# Checks a quote against a free public lyrics API before it's ever posted -
-# the LLM can hallucinate a plausible-sounding line that doesn't actually
-# appear in the song (this happened in practice). Prints one of:
-#   verified   - the (normalized) quote was found in the fetched lyrics
-#   mismatch   - lyrics were found, but the quote is NOT in them (likely hallucinated)
-#   unverified - no lyrics available for this band/song (e.g. niche/local acts) - can't check
-verify_quote() {
-  local band="$1" song="$2" quote="$3"
-  local eband esong resp lyrics norm_lyrics norm_quote
+# Fetches lyrics for a band/song from a free public lyrics API. Echoes the
+# lyrics text and returns 0 on success; returns 1 (nothing echoed) if no
+# lyrics are available (e.g. niche/local acts, or a title the API can't
+# match) - the caller can't get a grounded quote for this song either way.
+fetch_lyrics() {
+  local band="$1" song="$2"
+  local eband esong resp lyrics
   eband=$(jq -rn --arg s "$band" '$s|@uri')
   esong=$(jq -rn --arg s "$song" '$s|@uri')
   if ! resp=$(curl -sS --max-time 15 "https://api.lyrics.ovh/v1/${eband}/${esong}"); then
-    echo "unverified"
-    return 0
+    return 1
   fi
   if echo "$resp" | jq -e '.error' >/dev/null 2>&1; then
     # The API often fails to match titles with an apostrophe (e.g. "Don't
@@ -94,10 +91,20 @@ verify_quote() {
     fi
   fi
   if echo "$resp" | jq -e '.error' >/dev/null 2>&1; then
-    echo "unverified"
-    return 0
+    return 1
   fi
   lyrics=$(echo "$resp" | jq -r '.lyrics // empty')
+  [ -n "$lyrics" ] || return 1
+  echo "$lyrics"
+}
+
+# Checks a model-extracted quote against the real lyrics text it was
+# supposedly extracted from - even when given the real text, a model can
+# still paraphrase or drift from the exact wording. Echoes "verified" or
+# "mismatch".
+check_quote_in_lyrics() {
+  local lyrics="$1" quote="$2"
+  local norm_lyrics norm_quote
   # iconv//TRANSLIT strips accents the same way the lyrics source does
   # (e.g. "bück" -> "buck", not "bck") - without it, every umlaut/accent
   # mismatch would falsely look like a hallucination.
@@ -114,7 +121,8 @@ DB_FILE="posted_quotes.json"
 BANDS_FILE="bands.txt"
 [ -f "$DB_FILE" ] || echo '[]' > "$DB_FILE"
 
-SCHEMA='{"type":"object","properties":{"song":{"type":"string"},"quote":{"type":"string"}},"required":["song","quote"],"additionalProperties":false}'
+SONG_SCHEMA='{"type":"object","properties":{"song":{"type":"string"}},"required":["song"],"additionalProperties":false}'
+QUOTE_SCHEMA='{"type":"object","properties":{"quote":{"type":"string"}},"required":["quote"],"additionalProperties":false}'
 
 # The band is picked here with `shuf`, not by the LLM: asked to "pick randomly",
 # models reliably gravitate towards the most famous/typical choice (e.g. Rammstein
@@ -146,34 +154,72 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   # it explicitly which songs of THIS band were already used.
   USED_SONGS=$(jq -c --arg band "$BAND" '[.[] | select((.band | ascii_downcase) == ($band | ascii_downcase)) | .song] | unique' "$DB_FILE")
 
-  PROMPT="Die Band ist '${BAND}'. Wähle einen Song dieser Band und ein kurzes, einprägsames Zitat (maximal 1-2 Zeilen, KEINE ganze Strophe) aus dem Songtext. Wähle nicht immer den bekanntesten Song - variiere bewusst."
+  SONG_PROMPT="Die Band ist '${BAND}'. Wähle einen Song dieser Band aus, von dem du den Songtext zuverlässig und wortwörtlich kennst. Wähle nicht immer den bekanntesten Song - variiere bewusst."
   if [ "$USED_SONGS" != "[]" ]; then
-    PROMPT="${PROMPT} Von dieser Band wurden bereits diese Songs verwendet, wähle einen ANDEREN: ${USED_SONGS}."
+    SONG_PROMPT="${SONG_PROMPT} Von dieser Band wurden bereits diese Songs verwendet, wähle einen ANDEREN: ${USED_SONGS}."
   fi
-  PROMPT="${PROMPT} Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Wichtig: Verwende ausschließlich eine Zeile, die wirklich und wortwörtlich im echten Songtext vorkommt. Erfinde NIEMALS eine Zeile. Wenn du dir bei einem Song nicht sicher bist, wähle einen anderen Song derselben Band, bei dem du dir des Wortlauts sicher bist. Antworte ausschließlich mit dem JSON-Objekt."
+  SONG_PROMPT="${SONG_PROMPT} Antworte ausschließlich mit dem JSON-Objekt."
 
-  REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$PROMPT" --argjson schema "$SCHEMA" \
+  SONG_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$SONG_PROMPT" --argjson schema "$SONG_SCHEMA" \
     '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7}}')
 
-  if ! RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$REQUEST"); then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt)"
+  if ! SONG_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$SONG_REQUEST"); then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Songwahl)"
     continue
   fi
 
-  RESULT=$(echo "$RAW" | jq -r '.message.content // empty')
-  if [ -z "$RESULT" ] || ! echo "$RESULT" | jq -e . >/dev/null 2>&1; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ungültige Ollama-Antwort (Versuch $attempt): $RAW"
+  SONG_RESULT=$(echo "$SONG_RAW" | jq -r '.message.content // empty')
+  if [ -z "$SONG_RESULT" ] || ! echo "$SONG_RESULT" | jq -e . >/dev/null 2>&1; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ungültige Ollama-Antwort (Versuch $attempt, Songwahl): $SONG_RAW"
     continue
   fi
 
-  SONG=$(echo "$RESULT" | jq -r '.song')
-  QUOTE=$(echo "$RESULT" | jq -r '.quote')
+  SONG=$(echo "$SONG_RESULT" | jq -r '.song')
+  if [ -z "$SONG" ] || [ "$SONG" = "null" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Kein Song in Ollama-Antwort (Versuch $attempt, $BAND) - erneuter Versuch"
+    continue
+  fi
 
   SONG_REPEAT=$(jq --arg band "$BAND" --arg song "$SONG" \
     '[.[] | select((.band | ascii_downcase) == ($band | ascii_downcase) and (.song | ascii_downcase) == ($song | ascii_downcase))] | length' "$DB_FILE")
 
   if [ "$SONG_REPEAT" -gt 0 ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Song bereits verwendet (Versuch $attempt, $BAND): $SONG - erneuter Versuch"
+    continue
+  fi
+
+  # Fetch the real lyrics BEFORE asking for a quote, so the model extracts
+  # a line from an actual source instead of recalling one from memory - this
+  # is what actually prevents hallucination, rather than just detecting it
+  # after the fact.
+  if ! LYRICS=$(fetch_lyrics "$BAND" "$SONG"); then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Keine Songtext-Quelle verfügbar, kein Zitat möglich (Versuch $attempt, $BAND - $SONG) - erneuter Versuch"
+    continue
+  fi
+
+  QUOTE_PROMPT="Hier ist der Songtext von '${SONG}' der Band '${BAND}':
+
+${LYRICS}
+
+Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgende Zeilen, KEINE ganze Strophe). Wichtig: Das Zitat MUSS wortwörtlich und exakt so im obigen Songtext vorkommen - kopiere es unverändert, erfinde oder verändere nichts. Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
+
+  QUOTE_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$QUOTE_PROMPT" --argjson schema "$QUOTE_SCHEMA" \
+    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7}}')
+
+  if ! QUOTE_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$QUOTE_REQUEST"); then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Zitatwahl)"
+    continue
+  fi
+
+  QUOTE_RESULT=$(echo "$QUOTE_RAW" | jq -r '.message.content // empty')
+  if [ -z "$QUOTE_RESULT" ] || ! echo "$QUOTE_RESULT" | jq -e . >/dev/null 2>&1; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ungültige Ollama-Antwort (Versuch $attempt, Zitatwahl): $QUOTE_RAW"
+    continue
+  fi
+
+  QUOTE=$(echo "$QUOTE_RESULT" | jq -r '.quote')
+  if [ -z "$QUOTE" ] || [ "$QUOTE" = "null" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Kein Zitat in Ollama-Antwort (Versuch $attempt, $BAND - $SONG) - erneuter Versuch"
     continue
   fi
 
@@ -184,13 +230,9 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     continue
   fi
 
-  VERIFY_STATUS=$(verify_quote "$BAND" "$SONG" "$QUOTE")
+  VERIFY_STATUS=$(check_quote_in_lyrics "$LYRICS" "$QUOTE")
   if [ "$VERIFY_STATUS" = "mismatch" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Zitat nicht in Songtext-Quelle gefunden, vermutlich halluziniert (Versuch $attempt, $BAND - $SONG): $QUOTE - erneuter Versuch"
-    continue
-  fi
-  if [ "$VERIFY_STATUS" = "unverified" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Keine Songtext-Quelle verfügbar, kein Nachweis möglich (Versuch $attempt, $BAND - $SONG): $QUOTE - erneuter Versuch"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Zitat weicht vom echten Songtext ab, vermutlich verändert (Versuch $attempt, $BAND - $SONG): $QUOTE - erneuter Versuch"
     continue
   fi
 
