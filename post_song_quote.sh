@@ -20,37 +20,22 @@ trap trim_log EXIT
 
 : "${OLLAMA_URL:?Set OLLAMA_URL (e.g. in .env) to your Ollama server, e.g. http://localhost:11434/api/chat}"
 : "${OLLAMA_MODEL:?Set OLLAMA_MODEL (e.g. in .env) to the model to use, e.g. llama3.1:8b}"
-: "${POST_NAME:=songcites}"
-: "${POST_TARGETS:=gettogether}"
+: "${POST_TARGETS:=mastodon}"
 
 # Validate every configured target up front, before doing any (costly) LLM work.
 IFS=',' read -ra TARGET_LIST <<< "$POST_TARGETS"
 for t in "${TARGET_LIST[@]}"; do
   case "$t" in
-    gettogether) : ;;
     mastodon)
       : "${MASTODON_URL:?Set MASTODON_URL (e.g. in .env) to your Mastodon instance, e.g. https://mastodon.social}"
       : "${MASTODON_ACCESS_TOKEN:?Set MASTODON_ACCESS_TOKEN (e.g. in .env) - create one under Settings > Development > New Application with the write:statuses scope}"
       ;;
     *)
-      echo "Unbekanntes POST_TARGET: '$t' (unterstützt: gettogether, mastodon)" >&2
+      echo "Unbekanntes POST_TARGET: '$t' (unterstützt: mastodon)" >&2
       exit 1
       ;;
   esac
 done
-
-post_to_gettogether() {
-  local text="$1" response
-  if ! response=$(curl -sS --max-time 30 -G 'https://gettogether.dev/post' --data-urlencode "name=${POST_NAME}" --data-urlencode "text=${text}"); then
-    jq -cn '{ok: false, error: "curl request failed (network/timeout)"}'
-    return 0
-  fi
-  if echo "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
-    jq -cn --arg id "$(echo "$response" | jq -r '.id')" '{ok: true, id: $id}'
-  else
-    jq -cn --arg error "$response" '{ok: false, error: $error}'
-  fi
-}
 
 post_to_mastodon() {
   local text="$1" response
@@ -236,8 +221,6 @@ Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgen
     continue
   fi
 
-  TEXT="${QUOTE} (${BAND}, ${SONG})"
-
   # Post to every configured target independently - one target being down
   # shouldn't block the others, but every result (success or failure) is
   # recorded so it's visible which platforms actually received the post.
@@ -245,7 +228,6 @@ Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgen
   any_ok=0
   for t in "${TARGET_LIST[@]}"; do
     case "$t" in
-      gettogether) RESULT_JSON=$(post_to_gettogether "$TEXT") ;;
       mastodon) RESULT_JSON=$(post_to_mastodon "🎶 ${QUOTE} 🎤
 (${BAND} · ${SONG}) 🎸
 
