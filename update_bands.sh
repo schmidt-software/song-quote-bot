@@ -20,7 +20,7 @@ QUERY="
 SELECT DISTINCT ?bandLabel ?sitelinks WHERE {
   ?band wdt:P31 wd:Q215380 .
   ?band wdt:P136/wdt:P279* ?genre .
-  VALUES ?genre { wd:Q11399 wd:Q38848 wd:Q484692 wd:Q207694 }
+  VALUES ?genre { wd:Q11399 wd:Q38848 wd:Q3071 wd:Q83270 }
   ?band wikibase:sitelinks ?sitelinks .
   FILTER(?sitelinks > ${MIN_SITELINKS})
   SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". }
