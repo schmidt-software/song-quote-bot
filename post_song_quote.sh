@@ -2,6 +2,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# cron appends this run's output to the log file (see crontab). Once we're
+# done writing to it, trim it back down to the last MAX_LOG_ENTRIES lines so
+# the file can't grow forever - oldest entries drop off first.
+LOG_FILE="post_song_quote.log"
+MAX_LOG_ENTRIES=20
+trim_log() {
+  [ -f "$LOG_FILE" ] || return 0
+  local tmp
+  tmp=$(mktemp "${LOG_FILE}.XXXXXX")
+  tail -n "$MAX_LOG_ENTRIES" "$LOG_FILE" > "$tmp" && mv "$tmp" "$LOG_FILE"
+}
+trap trim_log EXIT
+
 # Local, untracked config (see .env.example) - holds your Ollama endpoint etc.
 [ -f ".env" ] && source ".env"
 
