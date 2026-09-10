@@ -90,7 +90,9 @@ The Mastodon post gets a couple of music emoji around the quote, then two line b
 
 ## Where the band list comes from
 
-`update_bands.sh` refreshes `bands.txt` from [Wikidata](https://www.wikidata.org) — a SPARQL query for musical groups tagged with a rock/metal/punk-rock/hard-rock genre, ranked by sitelink count (a decent cross-language popularity proxy) and capped at the top 200. Wikidata's data is CC0, so there's no attribution/ToS concern, and the list stays reasonably current as Wikidata itself gets edited, without anyone having to hand-maintain a band list.
+`update_bands.sh` refreshes `bands.txt` from [Wikidata](https://www.wikidata.org) — a SPARQL query for musical groups tagged with one of the genres in `WIKIDATA_GENRE_QIDS` (an `.env` setting, comma-separated Wikidata QIDs, defaults to rock/heavy metal/punk rock/hard rock), ranked by sitelink count (a decent cross-language popularity proxy) and capped at the top 200. Wikidata's data is CC0, so there's no attribution/ToS concern, and the list stays reasonably current as Wikidata itself gets edited, without anyone having to hand-maintain a band list.
+
+To change the genres, look one up on [wikidata.org](https://www.wikidata.org) (search for it, then read the "Q..." out of the item's URL) and set `WIKIDATA_GENRE_QIDS` to a comma-separated list of QIDs in `.env`.
 
 Run it separately from `post_song_quote.sh` (e.g. once daily via `cron`, see above) — Wikidata's public endpoint isn't meant for hourly hammering. If the query fails or comes back empty, the existing `bands.txt` is left untouched rather than wiped, so a transient Wikidata outage never blocks a post.
 
