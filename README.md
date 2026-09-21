@@ -79,6 +79,7 @@ All local, machine-specific settings live in `.env` (git-ignored, see `.env.exam
 | `OLLAMA_URL`             | Full URL of your Ollama server's chat endpoint, e.g. `http://localhost:11434/api/chat` |
 | `OLLAMA_MODEL`           | Model name to use for picking band/song/quote                       |
 | `OLLAMA_NUM_CTX`         | Context window for the Ollama requests (optional, default `8192`) — see *How variety is enforced* for why this matters |
+| `OLLAMA_KEEP_ALIVE`      | How long Ollama keeps the model loaded after a request (optional, default `30m`) — see *Why a run can take a while* |
 | `POST_TARGETS`           | Comma-separated list of platforms to post to (currently just `mastodon`) |
 | `MASTODON_URL`           | Base URL of your Mastodon instance                                   |
 | `MASTODON_ACCESS_TOKEN`  | Access token with the `write:statuses` scope — create one under *Settings → Development → New Application* on your instance |
@@ -122,9 +123,17 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 
 `posted_quotes.json` is a local database of everything already posted (band, song, quote, album and year, genre, country, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to `MAX_ATTEMPTS` times) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
 
-**The database is kept in full, but only its tail is put into the prompt** (`PROMPT_QUOTE_HISTORY`, currently the last `30` quotes). This distinction matters: the prompt grows by one entry per run, so passing the *whole* database eventually overflows the model's context window. Ollama then silently truncates the prompt keeping only its **end** — the fetched lyrics and the actual instruction fall out of context, and the model simply echoes back the last quote it was shown, which the duplicate check rejects on every attempt. That is a total posting outage, and it arrives gradually: first a few runs per day fail (when a song's lyrics are long), then most, then all.
+**The database is kept in full, but only its tail is put into the prompt** (`PROMPT_QUOTE_HISTORY`, currently the last `10` quotes). This distinction matters for two independent reasons.
 
-Shortening the in-prompt list costs nothing in correctness, because the list is only a *hint* that steers the model away from obvious repeats. The binding duplicate check runs in the script, against the complete database — a quote posted hundreds of entries ago is still reliably caught and retried. `OLLAMA_NUM_CTX` pins the context window explicitly for the same reason: server-side defaults are small (2k–4k) and can shrink further under memory pressure, regardless of what the model itself supports.
+The first is context: the prompt grows by one entry per run, so passing the *whole* database eventually overflows the model's context window. Ollama then silently truncates the prompt keeping only its **end** — the fetched lyrics and the actual instruction fall out of context — and posting stops working altogether.
+
+The second is that the list cuts both ways, and this one bites long before the context does. Handed a list of finished, ready-made quotes, the model sometimes just returns one of them instead of reading the lyrics it was given — the *same* quote for band after band, every attempt rejected as a duplicate, until the run gives up having posted nothing. A short list is a weaker temptation, and it is the cheaper trade: the variety a long list buys is marginal, a failed run is not.
+
+Shortening the list costs nothing in correctness, because it is only a *hint* that steers the model away from obvious repeats. The binding duplicate check runs in the script, against the complete database — a quote posted hundreds of entries ago is still reliably caught and retried. `OLLAMA_NUM_CTX` pins the context window explicitly for a related reason: server-side defaults are small (2k–4k) and can shrink further under memory pressure, regardless of what the model itself supports. The prompt itself is nowhere near that — a worst case of the longest lyrics plus the recent-quote list measures under 2k tokens.
+
+### Why a run can take a while
+
+The script reports every attempt as it starts it, because otherwise a run looks like a hang: the first thing it does is ask the model for a song, and that single call is the slowest step in the whole script. Ollama unloads an idle model after five minutes by default, which any scheduled run will miss, so each run would pay a full cold load — tens of seconds of silence, and for a large model enough to blow the 90-second request timeout and lose the attempt outright. `OLLAMA_KEEP_ALIVE` (default `30m`) keeps the model resident between runs instead; set it to `0` if the Ollama box needs its memory back immediately, at the cost of that cold start.
 
 ## Lyrics verification (and its limits)
 

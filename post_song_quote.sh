@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 # done writing to it, trim it back down to the last MAX_LOG_ENTRIES lines so
 # the file can't grow forever - oldest entries drop off first.
 LOG_FILE="post_song_quote.log"
-MAX_LOG_ENTRIES=20
+MAX_LOG_ENTRIES=50
 trim_log() {
   [ -f "$LOG_FILE" ] || return 0
   local tmp
@@ -23,12 +23,23 @@ trap trim_log EXIT
 # Context window for every Ollama request. It has to hold the whole prompt
 # (instructions + lyrics + recent-quote list). Ollama silently truncates a longer
 # prompt, keeping only its END - which drops the lyrics and the actual task and
-# leaves the model parroting back the last quote it was shown. Server defaults are
-# small (2k-4k) and can shrink further under memory pressure, so pin it here.
+# leaves the model working from whatever is left. Server defaults are small
+# (2k-4k) and can shrink further under memory pressure, so pin it here. A
+# measured worst case (longest lyrics plus the recent-quote list) is well under
+# 2k tokens, so the default below has room to spare - it guards against a small
+# server default, not against the prompt itself getting big.
 : "${OLLAMA_NUM_CTX:=8192}"
 case "$OLLAMA_NUM_CTX" in
   ''|*[!0-9]*) echo "OLLAMA_NUM_CTX muss eine positive Zahl sein: '$OLLAMA_NUM_CTX'" >&2; exit 1 ;;
 esac
+# How long Ollama keeps the model in memory after answering. The server default
+# is 5 minutes, so a run that comes around once a day always pays a full cold
+# load - tens of seconds of silence before the first answer, and with a large
+# model enough to hit the 90s request timeout further down and lose the attempt
+# outright. Keeping it resident costs the server memory in between, so it stays
+# configurable: "0" unloads immediately, "-1" keeps it loaded indefinitely.
+: "${OLLAMA_KEEP_ALIVE:=30m}"
+
 : "${POST_TARGETS:=mastodon}"
 
 # Validate every configured target up front, before doing any (costly) LLM work.
@@ -230,18 +241,32 @@ done
 
 # How many recently posted quotes the prompt is told about. The database itself
 # is kept complete - but feeding ALL of it to the model grows by one entry per
-# run and eventually overflows the context window (this is what broke posting
-# after ~340 entries). The duplicate check further down still runs against the
-# COMPLETE database, so nothing is forgotten; this list is only a hint that
-# steers the model away from the most recent repeats.
-PROMPT_QUOTE_HISTORY=30
+# run and eventually overflows the context window. The duplicate check further
+# down still runs against the COMPLETE database, so nothing is forgotten; this
+# list is only a hint that steers the model away from the most recent repeats.
+#
+# It is deliberately short, because the list cuts both ways: shown a pile of
+# ready-made quotes, the model sometimes hands one straight back instead of
+# reading the lyrics - the same quote for band after band, every attempt
+# rejected as a duplicate until the run gives up with nothing posted. The
+# longer the list, the more likely that is, and the little extra variety a
+# longer one buys is not worth a failed run.
+PROMPT_QUOTE_HISTORY=10
 
 MAX_ATTEMPTS=10
 success=0
 
+# Everything below only reports failures, so without this the script sits there
+# mute until something goes wrong - and the very first thing it does is the one
+# step that can take a minute and a half (a cold model, see OLLAMA_KEEP_ALIVE).
+# Run by hand, that is indistinguishable from a hang, so announce each attempt
+# BEFORE making the call that might stall on it.
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Start - bis zu $MAX_ATTEMPTS Versuche"
+
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   BAND_LINE=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
   IFS=$'\t' read -r BAND BAND_GENRE BAND_COUNTRY <<< "$BAND_LINE"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Versuch $attempt/$MAX_ATTEMPTS: $BAND - frage Modell nach einem Song"
   EXISTING=$(jq -c --argjson n "$PROMPT_QUOTE_HISTORY" '[.[-$n:][] | .quote]' "$DB_FILE")
   # Same bias as with bands: left to itself, the model keeps reaching for the
   # band's single most famous song (e.g. always "Du hast" for Rammstein). Tell
@@ -254,8 +279,8 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   fi
   SONG_PROMPT="${SONG_PROMPT} Antworte ausschließlich mit dem JSON-Objekt."
 
-  SONG_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$SONG_PROMPT" --argjson schema "$SONG_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
+  SONG_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$SONG_PROMPT" --argjson schema "$SONG_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" --arg keep "$OLLAMA_KEEP_ALIVE" \
+    '{model: $model, stream: false, think: false, keep_alive: $keep, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
 
   if ! SONG_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$SONG_REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Songwahl)"
@@ -297,8 +322,8 @@ ${LYRICS}
 
 Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgende Zeilen, KEINE ganze Strophe). Wichtig: Das Zitat MUSS wortwörtlich und exakt so im obigen Songtext vorkommen - kopiere es unverändert, erfinde oder verändere nichts. Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
 
-  QUOTE_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$QUOTE_PROMPT" --argjson schema "$QUOTE_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
+  QUOTE_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$QUOTE_PROMPT" --argjson schema "$QUOTE_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" --arg keep "$OLLAMA_KEEP_ALIVE" \
+    '{model: $model, stream: false, think: false, keep_alive: $keep, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
 
   if ! QUOTE_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$QUOTE_REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Zitatwahl)"
