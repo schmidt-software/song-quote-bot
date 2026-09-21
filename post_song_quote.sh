@@ -16,6 +16,8 @@ trim_log() {
 trap trim_log EXIT
 
 # Local, untracked config (see .env.example) - holds your Ollama endpoint etc.
+# DRY_RUN is picked up before that, see where it is evaluated below.
+DRY_RUN_ARG="${DRY_RUN-}"
 [ -f ".env" ] && source ".env"
 
 : "${OLLAMA_URL:?Set OLLAMA_URL (e.g. in .env) to your Ollama server, e.g. http://localhost:11434/api/chat}"
@@ -42,13 +44,37 @@ esac
 
 : "${POST_TARGETS:=mastodon}"
 
+# A dry run does everything a real one does - pick, fetch lyrics, extract and
+# verify the quote, look up the album - and then prints the finished post
+# instead of publishing it, leaving the database untouched. Testing a change to
+# the script otherwise means posting to the live account for real, once per run,
+# and cleaning up afterwards.
+#
+# A value passed on the command line (DRY_RUN=1 ./post_song_quote.sh) wins over
+# whatever the config file sets: sourcing it would otherwise silently overwrite
+# the variable, and a "dry run" that quietly posts for real is the one failure
+# this switch must never have.
+if [ -n "$DRY_RUN_ARG" ]; then
+  DRY_RUN="$DRY_RUN_ARG"
+fi
+: "${DRY_RUN:=0}"
+case "$DRY_RUN" in
+  0|1) ;;
+  *) echo "DRY_RUN muss 0 oder 1 sein: '$DRY_RUN'" >&2; exit 1 ;;
+esac
+
 # Validate every configured target up front, before doing any (costly) LLM work.
 IFS=',' read -ra TARGET_LIST <<< "$POST_TARGETS"
 for t in "${TARGET_LIST[@]}"; do
   case "$t" in
     mastodon)
-      : "${MASTODON_URL:?Set MASTODON_URL (e.g. in .env) to your Mastodon instance, e.g. https://mastodon.social}"
-      : "${MASTODON_ACCESS_TOKEN:?Set MASTODON_ACCESS_TOKEN (e.g. in .env) - create one under Settings > Development > New Application with the write:statuses scope}"
+      # A dry run never reaches the platform, so it must not insist on
+      # credentials either - that way a fresh checkout can be tried end to end
+      # before any account exists. The target NAME is still validated below.
+      if [ "$DRY_RUN" = "0" ]; then
+        : "${MASTODON_URL:?Set MASTODON_URL (e.g. in .env) to your Mastodon instance, e.g. https://mastodon.social}"
+        : "${MASTODON_ACCESS_TOKEN:?Set MASTODON_ACCESS_TOKEN (e.g. in .env) - create one under Settings > Development > New Application with the write:statuses scope}"
+      fi
       ;;
     *)
       echo "Unbekanntes POST_TARGET: '$t' (unterstützt: mastodon)" >&2
@@ -261,7 +287,9 @@ success=0
 # step that can take a minute and a half (a cold model, see OLLAMA_KEEP_ALIVE).
 # Run by hand, that is indistinguishable from a hang, so announce each attempt
 # BEFORE making the call that might stall on it.
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Start - bis zu $MAX_ATTEMPTS Versuche"
+START_NOTE=""
+[ "$DRY_RUN" = "1" ] && START_NOTE=" (DRY_RUN: es wird nichts gepostet und nichts gespeichert)"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Start - bis zu $MAX_ATTEMPTS Versuche${START_NOTE}"
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   BAND_LINE=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
@@ -391,6 +419,16 @@ ${META_LINE}"
   POST_TEXT="${POST_TEXT}
 
 ${HASHTAGS}"
+
+  # A dry run stops here: everything that could have gone wrong upstream has
+  # been exercised by now, and what is left - publishing and recording it - is
+  # exactly what a dry run must not do.
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) DRY_RUN ($VERIFY_STATUS): nicht gepostet, nichts gespeichert - der Post wäre:"
+    printf '%s\n' "$POST_TEXT" | sed 's/^/  | /'
+    success=1
+    break
+  fi
 
   # Post to every configured target independently - one target being down
   # shouldn't block the others, but every result (success or failure) is

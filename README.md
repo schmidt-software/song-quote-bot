@@ -57,8 +57,9 @@ cp .env.example .env
 # edit .env: point OLLAMA_URL at your Ollama server and pick a model
 
 chmod +x post_song_quote.sh update_bands.sh
-./update_bands.sh       # generate bands.txt from Wikidata
-./post_song_quote.sh    # try it once
+./update_bands.sh                # generate bands.txt from Wikidata
+DRY_RUN=1 ./post_song_quote.sh   # try it once without publishing anything
+./post_song_quote.sh             # and for real
 ```
 
 Schedule both via `cron` — posting hourly, the band list refreshed daily:
@@ -81,6 +82,7 @@ All local, machine-specific settings live in `.env` (git-ignored, see `.env.exam
 | `OLLAMA_NUM_CTX`         | Context window for the Ollama requests (optional, default `8192`) — see *How variety is enforced* for why this matters |
 | `OLLAMA_KEEP_ALIVE`      | How long Ollama keeps the model loaded after a request (optional, default `30m`) — see *Why a run can take a while* |
 | `POST_TARGETS`           | Comma-separated list of platforms to post to (currently just `mastodon`) |
+| `DRY_RUN`                | `1` runs everything but publishes nothing (optional, default `0`) — see *Trying a run without publishing* |
 | `MASTODON_URL`           | Base URL of your Mastodon instance                                   |
 | `MASTODON_ACCESS_TOKEN`  | Access token with the `write:statuses` scope — create one under *Settings → Development → New Application* on your instance |
 
@@ -102,6 +104,26 @@ Oh God, help me 🎤
 Everything past the quote, the band and the song is optional: the album line, the country and the genre hashtag each appear only if that lookup produced something, and a post goes out regardless. Genre and country come from `bands.txt` (i.e. from Wikidata), the album and its year from MusicBrainz — see *Where the album comes from*.
 
 > **Note:** Mastodon support has been verified against a real instance/account (post + delete, and the invalid-token error path).
+
+### Trying a run without publishing
+
+The script has one side effect that can't be taken back: it posts, publicly, to a real account. Testing a change to it therefore used to mean publishing a real toot per run and deleting it again afterwards.
+
+`DRY_RUN=1` makes a run do everything except that final step — pick the band, ask the model for a song, fetch the lyrics, extract and verify the quote, look up the album — and then print the finished post instead of sending it:
+
+```console
+$ DRY_RUN=1 ./post_song_quote.sh
+2026-01-01T12:00:00Z Start - bis zu 10 Versuche (DRY_RUN: es wird nichts gepostet und nichts gespeichert)
+2026-01-01T12:00:00Z Versuch 1/10: Thin Lizzy - frage Modell nach einem Song
+2026-01-01T12:00:06Z DRY_RUN (verified): nicht gepostet, nichts gespeichert - der Post wäre:
+  | 🎶 The boys are back in town 🎤
+  | (Thin Lizzy · The Boys Are Back in Town) 🎸
+  | 💿 Jailbreak (1976) · 🌍 Ireland
+  |
+  | #songquote #songcite #HardRock
+```
+
+`posted_quotes.json` stays untouched, so a dry run neither records the quote nor burns it for a later real run — but for the same reason, repeated dry runs can hand you the same quote twice. Platform credentials aren't required either, which is what lets a fresh checkout be tried end to end before any account exists. A `DRY_RUN` given on the command line overrides the one in `.env`, so `DRY_RUN=1` always means what it says.
 
 ## Where the band list comes from
 
