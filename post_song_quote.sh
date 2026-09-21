@@ -20,6 +20,15 @@ trap trim_log EXIT
 
 : "${OLLAMA_URL:?Set OLLAMA_URL (e.g. in .env) to your Ollama server, e.g. http://localhost:11434/api/chat}"
 : "${OLLAMA_MODEL:?Set OLLAMA_MODEL (e.g. in .env) to the model to use, e.g. llama3.1:8b}"
+# Context window for every Ollama request. It has to hold the whole prompt
+# (instructions + lyrics + recent-quote list). Ollama silently truncates a longer
+# prompt, keeping only its END - which drops the lyrics and the actual task and
+# leaves the model parroting back the last quote it was shown. Server defaults are
+# small (2k-4k) and can shrink further under memory pressure, so pin it here.
+: "${OLLAMA_NUM_CTX:=8192}"
+case "$OLLAMA_NUM_CTX" in
+  ''|*[!0-9]*) echo "OLLAMA_NUM_CTX muss eine positive Zahl sein: '$OLLAMA_NUM_CTX'" >&2; exit 1 ;;
+esac
 : "${POST_TARGETS:=mastodon}"
 
 # Validate every configured target up front, before doing any (costly) LLM work.
@@ -128,12 +137,20 @@ for b in "${ALL_BANDS[@]}"; do
 done
 [ ${#CANDIDATE_BANDS[@]} -eq 0 ] && CANDIDATE_BANDS=("${ALL_BANDS[@]}")
 
+# How many recently posted quotes the prompt is told about. The database itself
+# is kept complete - but feeding ALL of it to the model grows by one entry per
+# run and eventually overflows the context window (this is what broke posting
+# after ~340 entries). The duplicate check further down still runs against the
+# COMPLETE database, so nothing is forgotten; this list is only a hint that
+# steers the model away from the most recent repeats.
+PROMPT_QUOTE_HISTORY=30
+
 MAX_ATTEMPTS=10
 success=0
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   BAND=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
-  EXISTING=$(jq -c '[.[] | .quote]' "$DB_FILE")
+  EXISTING=$(jq -c --argjson n "$PROMPT_QUOTE_HISTORY" '[.[-$n:][] | .quote]' "$DB_FILE")
   # Same bias as with bands: left to itself, the model keeps reaching for the
   # band's single most famous song (e.g. always "Du hast" for Rammstein). Tell
   # it explicitly which songs of THIS band were already used.
@@ -145,8 +162,8 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   fi
   SONG_PROMPT="${SONG_PROMPT} Antworte ausschließlich mit dem JSON-Objekt."
 
-  SONG_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$SONG_PROMPT" --argjson schema "$SONG_SCHEMA" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7}}')
+  SONG_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$SONG_PROMPT" --argjson schema "$SONG_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" \
+    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
 
   if ! SONG_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$SONG_REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Songwahl)"
@@ -188,8 +205,8 @@ ${LYRICS}
 
 Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgende Zeilen, KEINE ganze Strophe). Wichtig: Das Zitat MUSS wortwörtlich und exakt so im obigen Songtext vorkommen - kopiere es unverändert, erfinde oder verändere nichts. Das Zitat darf NICHT (auch nicht sinngemäß oder fast identisch) in dieser Liste bereits veröffentlichter Zitate enthalten sein: ${EXISTING}. Antworte ausschließlich mit dem JSON-Objekt."
 
-  QUOTE_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$QUOTE_PROMPT" --argjson schema "$QUOTE_SCHEMA" \
-    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7}}')
+  QUOTE_REQUEST=$(jq -n --arg model "$OLLAMA_MODEL" --arg content "$QUOTE_PROMPT" --argjson schema "$QUOTE_SCHEMA" --argjson ctx "$OLLAMA_NUM_CTX" \
+    '{model: $model, stream: false, think: false, messages: [{role: "user", content: $content}], format: $schema, options: {temperature: 0.7, num_ctx: $ctx}}')
 
   if ! QUOTE_RAW=$(curl -sS --max-time 90 "$OLLAMA_URL" -d "$QUOTE_REQUEST"); then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Ollama-Aufruf fehlgeschlagen (Versuch $attempt, Zitatwahl)"

@@ -76,6 +76,7 @@ All local, machine-specific settings live in `.env` (git-ignored, see `.env.exam
 |--------------------------|-----------------------------------------------------------------------|
 | `OLLAMA_URL`             | Full URL of your Ollama server's chat endpoint, e.g. `http://localhost:11434/api/chat` |
 | `OLLAMA_MODEL`           | Model name to use for picking band/song/quote                       |
+| `OLLAMA_NUM_CTX`         | Context window for the Ollama requests (optional, default `8192`) — see *How variety is enforced* for why this matters |
 | `POST_TARGETS`           | Comma-separated list of platforms to post to (currently just `mastodon`) |
 | `MASTODON_URL`           | Base URL of your Mastodon instance                                   |
 | `MASTODON_ACCESS_TOKEN`  | Access token with the `write:statuses` scope — create one under *Settings → Development → New Application* on your instance |
@@ -104,9 +105,13 @@ LLMs asked to "pick randomly" reliably gravitate towards the single most famous/
 
 - **Band:** chosen in the script itself with `shuf`, excluding the most recently used bands from the draw — not left to the model.
 - **Song:** the model is told which songs of the chosen band were already posted and asked to pick a different one.
-- **Quote:** the model is told which quotes were already posted and asked to avoid them.
+- **Quote:** the model is told which quotes were recently posted and asked to avoid them.
 
-`posted_quotes.json` is a small local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to `MAX_ATTEMPTS` times) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
+`posted_quotes.json` is a local database of everything already posted (band, song, quote, per-platform result, timestamp) that backs all three checks. The script independently re-verifies the model's song and quote choice against it (case-insensitive) before ever publishing — if the model repeats a song or quote anyway, the script retries (up to `MAX_ATTEMPTS` times) rather than posting a known duplicate. `posted_quotes.json` is regenerated automatically (starts as `[]`) and isn't tracked in git, since it's per-installation runtime state.
+
+**The database is kept in full, but only its tail is put into the prompt** (`PROMPT_QUOTE_HISTORY`, currently the last `30` quotes). This distinction matters: the prompt grows by one entry per run, so passing the *whole* database eventually overflows the model's context window. Ollama then silently truncates the prompt keeping only its **end** — the fetched lyrics and the actual instruction fall out of context, and the model simply echoes back the last quote it was shown, which the duplicate check rejects on every attempt. That is a total posting outage, and it arrives gradually: first a few runs per day fail (when a song's lyrics are long), then most, then all.
+
+Shortening the in-prompt list costs nothing in correctness, because the list is only a *hint* that steers the model away from obvious repeats. The binding duplicate check runs in the script, against the complete database — a quote posted hundreds of entries ago is still reliably caught and retried. `OLLAMA_NUM_CTX` pins the context window explicitly for the same reason: server-side defaults are small (2k–4k) and can shrink further under memory pressure, regardless of what the model itself supports.
 
 ## Lyrics verification (and its limits)
 
