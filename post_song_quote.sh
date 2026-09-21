@@ -92,6 +92,92 @@ fetch_lyrics() {
   echo "$lyrics"
 }
 
+# Looks up which album a song first appeared on and when, via MusicBrainz
+# (CC0 data, no API key needed, but it asks for a descriptive User-Agent and at
+# most one request per second). Echoes "album<TAB>year" and returns 0; returns 1
+# if nothing solid was found - the post then simply carries no album.
+#
+# It takes two requests: the recording search knows which release groups a song
+# appears on, but not when those came out, so the candidates are looked up a
+# second time by id. Only the band's own studio albums qualify - an official
+# release of a release group typed "Album", with no secondary type and not
+# credited to another artist, which is what rules out live records, best-ofs,
+# bootlegs and samplers - and of those the oldest one wins, so the post names
+# the album a song came from, not a reissue or a later record it turned up on.
+MUSICBRAINZ_UA="song-quote-bot/1.0 ( https://github.com/schmidt-software/song-quote-bot )"
+fetch_album_info() {
+  local band="$1" song="$2"
+  local query resp rg_ids info
+  # A double quote inside the terms would break the search syntax - drop it.
+  # status/primarytype narrow the search to songs that appear on an official
+  # album at all, and -comment:live throws out the live recordings, of which a
+  # touring band has hundreds: for "For Whom the Bell Tolls" they fill the
+  # entire result page and bury the studio recording, which is the one whose
+  # album the post is after. Filtering secondary types here instead would
+  # backfire - it drops a studio recording just for also being on some
+  # compilation - so that happens per release further down.
+  query="artist:\"${band//\"/}\" AND recording:\"${song//\"/}\" AND status:official AND primarytype:album AND -comment:live"
+  if ! resp=$(curl -sS --max-time 20 -G "https://musicbrainz.org/ws/2/recording" \
+    --data-urlencode "query=$query" --data "fmt=json" --data "limit=50" \
+    -H "User-Agent: ${MUSICBRAINZ_UA}"); then
+    return 1
+  fi
+  # Only near-exact title matches count: lowering the score cutoff to 90 lets
+  # other songs of the same band in, and an older one of those then wins the
+  # "oldest album" pick below (e.g. "Come as You Are" landing on In Utero).
+  rg_ids=$(echo "$resp" | jq -r --arg band "$band" '
+    def norm: ascii_downcase | gsub("[^a-z0-9]"; "");
+    [ .recordings[]? | select((.score // 0) >= 95)
+      | select(((.disambiguation // "") | ascii_downcase | test("live")) | not)
+      | .releases[]?
+      | select((.status // "") == "Official")
+      | select((."release-group"."primary-type" // "") == "Album")
+      | select((((."release-group"."secondary-types") // []) | length) == 0)
+      # A release credited to someone else is a sampler the song merely landed
+      # on ("Various Artists") rather than a record of this band - that is how
+      # a German hit compilation came out as the album of The Script. Plenty of
+      # perfectly good releases carry no credit at all, so only a credit that
+      # is there AND names somebody else disqualifies a release.
+      | select((((.["artist-credit"] // []) | length) == 0)
+               or ([.["artist-credit"][].name | norm] | index($band | norm) != null))
+      | ."release-group".id ] | unique | .[:12] | join(" OR ")')
+  [ -n "$rg_ids" ] || return 1
+  # Stay within MusicBrainz's one-request-per-second rate limit.
+  sleep 1
+  if ! resp=$(curl -sS --max-time 20 -G "https://musicbrainz.org/ws/2/release-group" \
+    --data-urlencode "query=rgid:(${rg_ids})" --data "fmt=json" --data "limit=25" \
+    -H "User-Agent: ${MUSICBRAINZ_UA}"); then
+    return 1
+  fi
+  info=$(echo "$resp" | jq -r '
+    [ ."release-groups"[]? | select(((."first-release-date" // "") | length) >= 4)
+      | {title: .title, date: ."first-release-date"} ]
+    | sort_by(.date) | .[0] // empty | [.title, (.date[0:4])] | @tsv')
+  [ -n "$info" ] || return 1
+  echo "$info"
+}
+
+# Turns a Wikidata genre label into a hashtag: "hard rock" -> "#HardRock".
+# Wikidata likes to spell a genre out as "... music" ("heavy metal music",
+# "rock music"), which makes for a clumsy tag, so that trailing word goes as
+# long as anything is left in front of it.
+# A hashtag can't carry spaces, punctuation or accents, and one without a
+# single letter isn't a hashtag on Mastodon - a label that doesn't survive all
+# that simply gets no tag.
+genre_hashtag() {
+  local genre="$1" tag
+  tag=$(printf '%s' "$genre" \
+    | iconv -f utf8 -t ascii//TRANSLIT 2>/dev/null \
+    | tr -cs 'a-zA-Z0-9' ' ' \
+    | awk '{
+        words = NF
+        if (words > 1 && tolower($words) == "music") words--
+        for (i = 1; i <= words; i++) printf "%s%s", toupper(substr($i, 1, 1)), substr($i, 2)
+      }')
+  echo "$tag" | grep -q '[a-zA-Z]' || return 1
+  echo "#${tag}"
+}
+
 # Checks a model-extracted quote against the real lyrics text it was
 # supposedly extracted from - even when given the real text, a model can
 # still paraphrase or drift from the exact wording. Echoes "verified" or
@@ -122,6 +208,10 @@ QUOTE_SCHEMA='{"type":"object","properties":{"quote":{"type":"string"}},"require
 # models reliably gravitate towards the most famous/typical choice (e.g. Rammstein
 # - "Du hast") instead of sampling the list uniformly. To keep the rotation moving,
 # the most recently used bands are excluded from the draw.
+#
+# Every line is "name<TAB>genre<TAB>country" as written by update_bands.sh.
+# A list that still holds plain names (an older or hand-written one) keeps
+# working - the post then just carries no genre and no country.
 mapfile -t ALL_BANDS < "$BANDS_FILE"
 TOTAL_BANDS=${#ALL_BANDS[@]}
 EXCLUDE_COUNT=$(( TOTAL_BANDS > 4 ? 3 : (TOTAL_BANDS > 1 ? TOTAL_BANDS - 1 : 0) ))
@@ -131,7 +221,8 @@ CANDIDATE_BANDS=()
 for b in "${ALL_BANDS[@]}"; do
   skip=0
   for r in "${RECENT_BANDS[@]:-}"; do
-    [ "$b" = "$r" ] && { skip=1; break; }
+    # The database only stores the name, so that's what's compared here.
+    [ "${b%%$'\t'*}" = "$r" ] && { skip=1; break; }
   done
   [ "$skip" -eq 0 ] && CANDIDATE_BANDS+=("$b")
 done
@@ -149,7 +240,8 @@ MAX_ATTEMPTS=10
 success=0
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-  BAND=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
+  BAND_LINE=$(printf '%s\n' "${CANDIDATE_BANDS[@]}" | shuf -n1)
+  IFS=$'\t' read -r BAND BAND_GENRE BAND_COUNTRY <<< "$BAND_LINE"
   EXISTING=$(jq -c --argjson n "$PROMPT_QUOTE_HISTORY" '[.[-$n:][] | .quote]' "$DB_FILE")
   # Same bias as with bands: left to itself, the model keeps reaching for the
   # band's single most famous song (e.g. always "Du hast" for Rammstein). Tell
@@ -238,6 +330,43 @@ Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgen
     continue
   fi
 
+  # Only now, for a quote that is actually going out, is the album looked up -
+  # a discarded attempt shouldn't cost MusicBrainz a request.
+  ALBUM=""
+  ALBUM_YEAR=""
+  if ALBUM_INFO=$(fetch_album_info "$BAND" "$SONG"); then
+    IFS=$'\t' read -r ALBUM ALBUM_YEAR <<< "$ALBUM_INFO"
+  else
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Kein Album gefunden ($BAND - $SONG) - Post ohne Albumangabe"
+  fi
+
+  # Everything beyond quote, band and song is optional, so the post is assembled
+  # here instead of inline: a lookup that came up empty must not leave a stray
+  # separator or a blank line in the middle of the toot.
+  META_LINE=""
+  if [ -n "$ALBUM" ]; then
+    META_LINE="💿 ${ALBUM} (${ALBUM_YEAR})"
+  fi
+  if [ -n "${BAND_COUNTRY:-}" ]; then
+    [ -n "$META_LINE" ] && META_LINE="${META_LINE} · "
+    META_LINE="${META_LINE}🌍 ${BAND_COUNTRY}"
+  fi
+
+  HASHTAGS="#songquote #songcite"
+  if [ -n "${BAND_GENRE:-}" ] && GENRE_TAG=$(genre_hashtag "$BAND_GENRE"); then
+    HASHTAGS="${HASHTAGS} ${GENRE_TAG}"
+  fi
+
+  POST_TEXT="🎶 ${QUOTE} 🎤
+(${BAND} · ${SONG}) 🎸"
+  if [ -n "$META_LINE" ]; then
+    POST_TEXT="${POST_TEXT}
+${META_LINE}"
+  fi
+  POST_TEXT="${POST_TEXT}
+
+${HASHTAGS}"
+
   # Post to every configured target independently - one target being down
   # shouldn't block the others, but every result (success or failure) is
   # recorded so it's visible which platforms actually received the post.
@@ -245,15 +374,12 @@ Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgen
   any_ok=0
   for t in "${TARGET_LIST[@]}"; do
     case "$t" in
-      mastodon) RESULT_JSON=$(post_to_mastodon "🎶 ${QUOTE} 🎤
-(${BAND} · ${SONG}) 🎸
-
-#songquote #songcite") ;;
+      mastodon) RESULT_JSON=$(post_to_mastodon "$POST_TEXT") ;;
     esac
     PLATFORM_ENTRIES=$(jq -c --arg k "$t" --argjson v "$RESULT_JSON" '. + [{key: $k, value: $v}]' <<< "$PLATFORM_ENTRIES")
     if echo "$RESULT_JSON" | jq -e '.ok == true' >/dev/null 2>&1; then
       any_ok=1
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [$t] Gepostet ($VERIFY_STATUS): \"$QUOTE\" ($BAND, $SONG) - $(echo "$RESULT_JSON" | jq -r '.id')"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [$t] Gepostet ($VERIFY_STATUS): \"$QUOTE\" ($BAND, $SONG${ALBUM:+, $ALBUM $ALBUM_YEAR}) - $(echo "$RESULT_JSON" | jq -r '.id')"
     else
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [$t] Post fehlgeschlagen (Versuch $attempt): $(echo "$RESULT_JSON" | jq -r '.error')"
     fi
@@ -262,8 +388,11 @@ Wähle daraus ein kurzes, einprägsames Zitat aus (maximal 1-2 aufeinanderfolgen
   if [ "$any_ok" -eq 1 ]; then
     PLATFORMS_JSON=$(jq -c 'from_entries' <<< "$PLATFORM_ENTRIES")
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # The extra fields record what the post actually showed; each is an empty
+    # string when that lookup found nothing.
     jq --arg band "$BAND" --arg song "$SONG" --arg quote "$QUOTE" --argjson platforms "$PLATFORMS_JSON" --arg ts "$NOW" --arg verify "$VERIFY_STATUS" \
-      '. += [{"band":$band,"song":$song,"quote":$quote,"platforms":$platforms,"lyrics_check":$verify,"posted_at":$ts}]' "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
+      --arg album "$ALBUM" --arg album_year "$ALBUM_YEAR" --arg genre "${BAND_GENRE:-}" --arg country "${BAND_COUNTRY:-}" \
+      '. += [{"band":$band,"song":$song,"quote":$quote,"album":$album,"album_year":$album_year,"genre":$genre,"country":$country,"platforms":$platforms,"lyrics_check":$verify,"posted_at":$ts}]' "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
     success=1
     break
   fi
